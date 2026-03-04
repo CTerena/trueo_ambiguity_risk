@@ -1,0 +1,26 @@
+[
+  {
+    "question": "Will Apple release a new product this year?",
+    "result": {
+      "risk_score": 70,
+      "risk_tags": ["ambiguous_time", "undefined_term", "vague_condition"],
+      "rationale": "1) 'This year' does not specify which calendar year, making resolution timing unclear. 2) 'New product' is vague - does this include minor updates, accessories, or only major product lines? 3) The definition of 'release' is unclear - does announcement count, or only shipping?"
+    }
+  },
+  {
+    "question": "Will Bitcoin exceed $100,000 USD on Binance on December 31, 2025 at 11:59 PM UTC?",
+    "result": {
+      "risk_score": 15,
+      "risk_tags": [],
+      "rationale": "This question is well-defined with clear parameters: specific asset (Bitcoin), precise price threshold ($100,000 USD), specific exchange (Binance), exact date and time with timezone. Minimal ambiguity exists."
+    }
+  },
+  {
+    "question": "Will there be a significant development in AI soon?",
+    "result": {
+      "risk_score": 85,
+      "risk_tags": ["ambiguous_time", "undefined_term", "ambiguous_quantity", "unidentified_subject", "high_disputability"],
+      "rationale": "1) 'Soon' is highly ambiguous without a specific timeframe. 2) 'Significant development' is undefined - what qualifies? 3) 'AI' is too broad - which area of AI? 4) No specific entity mentioned. 5) Highly subjective and prone to disputes."
+    }
+  }
+]
