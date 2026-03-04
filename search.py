@@ -6,6 +6,7 @@ prompt-ready context for downstream ambiguity analysis.
 """
 
 import json
+import re
 from typing import Any, Dict, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -20,6 +21,31 @@ from config import (
 )
 from models import SearchContext, SearchEvidenceItem
 
+COMMUNITY_DOMAINS = {
+    "reddit.com",
+    "www.reddit.com",
+    "manifold.markets",
+    "twitter.com",
+    "x.com",
+    "www.x.com",
+    "youtube.com",
+    "www.youtube.com",
+    "news.ycombinator.com",
+}
+
+MEDIA_DOMAINS = {
+    "techcrunch.com",
+    "www.techcrunch.com",
+    "theverge.com",
+    "www.theverge.com",
+    "mashable.com",
+    "www.mashable.com",
+    "reuters.com",
+    "www.reuters.com",
+    "bloomberg.com",
+    "www.bloomberg.com",
+}
+
 
 def build_search_query(question: str) -> str:
     """
@@ -32,6 +58,28 @@ def build_search_query(question: str) -> str:
         Search query string
     """
     return f"{question} official source definition resolution criteria"
+
+
+def build_official_site_queries(question: str) -> list[str]:
+    """
+    Build follow-up queries biased toward likely official domains.
+
+    Args:
+        question: Market question being analyzed
+
+    Returns:
+        List of site-biased search queries
+    """
+    site_queries = []
+    seen_domains = set()
+
+    for domain in _build_candidate_official_domains(question):
+        if domain in seen_domains:
+            continue
+        seen_domains.add(domain)
+        site_queries.append(f"site:{domain} {question} official announcement release")
+
+    return site_queries
 
 
 def format_search_context(search_context: SearchContext) -> str:
@@ -114,36 +162,17 @@ class WebSearchClient:
             Structured search context
         """
         query = build_search_query(question)
-        payload = {
-            "api_key": self.api_key,
-            "query": query,
-            "topic": self.topic,
-            "search_depth": self.search_depth,
-            "max_results": self.max_results,
-            "include_answer": True,
-            "include_raw_content": False,
-        }
+        primary_response = self._run_search_request(query)
 
-        request = Request(
-            self.search_url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            method="POST",
-        )
+        merged_results = list(primary_response.get("results", []))
+        for official_query in build_official_site_queries(question):
+            official_response = self._run_search_request(official_query)
+            merged_results.extend(official_response.get("results", []))
 
-        try:
-            with urlopen(request, timeout=15) as response:
-                response_data = json.loads(response.read().decode("utf-8"))
-        except HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Tavily search failed with HTTP {exc.code}: {error_body}") from exc
-        except URLError as exc:
-            raise RuntimeError(f"Tavily search request failed: {exc.reason}") from exc
+        combined_response = dict(primary_response)
+        combined_response["results"] = self._deduplicate_results(merged_results)
 
-        return self._parse_response(query=query, response_data=response_data)
+        return self._parse_response(query=query, response_data=combined_response)
 
     def build_context(self, question: str) -> str:
         """
@@ -188,6 +217,7 @@ class WebSearchClient:
                 )
             )
 
+        evidence = self._prioritize_authoritative_sources(query=query, evidence=evidence)
         summary = self._clean_text(response_data.get("answer")) or self._build_summary(evidence)
 
         return SearchContext(
@@ -196,6 +226,50 @@ class WebSearchClient:
             summary=summary,
             evidence=evidence,
         )
+
+    def _run_search_request(self, query: str) -> Dict[str, Any]:
+        payload = {
+            "api_key": self.api_key,
+            "query": query,
+            "topic": self.topic,
+            "search_depth": self.search_depth,
+            "max_results": self.max_results,
+            "include_answer": True,
+            "include_raw_content": False,
+        }
+
+        request = Request(
+            self.search_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+
+        try:
+            with urlopen(request, timeout=15) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Tavily search failed with HTTP {exc.code}: {error_body}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"Tavily search request failed: {exc.reason}") from exc
+
+    @staticmethod
+    def _deduplicate_results(results: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+        deduped = []
+        seen_urls = set()
+
+        for result in results:
+            url = result.get("url")
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            deduped.append(result)
+
+        return deduped
 
     @staticmethod
     def _clean_text(value: Optional[str]) -> Optional[str]:
@@ -222,6 +296,82 @@ class WebSearchClient:
             return None
         return urlparse(url).netloc or None
 
+    def _prioritize_authoritative_sources(
+        self,
+        query: str,
+        evidence: list[SearchEvidenceItem],
+    ) -> list[SearchEvidenceItem]:
+        subject_terms = self._extract_subject_terms(query)
+
+        return sorted(
+            evidence,
+            key=lambda item: (
+                self._authority_rank(item, subject_terms),
+                item.score if item.score is not None else float("-inf"),
+            ),
+            reverse=True,
+        )
+
+    def _authority_rank(self, item: SearchEvidenceItem, subject_terms: set[str]) -> int:
+        domain = (item.source or "").lower()
+        domain_labels = set(part for part in re.split(r"[^a-z0-9]+", domain) if part)
+        domain_matches_subject = bool(subject_terms & domain_labels)
+
+        rank = 0
+
+        if domain.endswith(".gov") or ".gov." in domain:
+            rank += 7
+        if domain.endswith(".edu") or ".edu." in domain:
+            rank += 5
+
+        if domain_matches_subject and domain not in COMMUNITY_DOMAINS and domain not in MEDIA_DOMAINS:
+            rank += 6
+
+        if any(label in {"docs", "blog", "news", "press", "support", "help"} for label in domain_labels):
+            rank += 1
+
+        if domain in MEDIA_DOMAINS:
+            rank += 1
+
+        if domain in COMMUNITY_DOMAINS:
+            rank -= 4
+
+        return rank
+
+    @staticmethod
+    def _extract_subject_terms(query: str) -> set[str]:
+        stop_terms = {
+            "official",
+            "source",
+            "definition",
+            "resolution",
+            "criteria",
+            "will",
+            "this",
+            "that",
+            "with",
+            "from",
+            "have",
+            "what",
+            "when",
+            "where",
+            "which",
+            "release",
+            "model",
+            "march",
+            "year",
+            "before",
+            "after",
+            "market",
+            "question",
+        }
+        tokens = {
+            token
+            for token in re.findall(r"[a-z0-9]+", query.lower())
+            if len(token) >= 3 and token not in stop_terms and not token.isdigit()
+        }
+        return tokens
+
     @staticmethod
     def _build_summary(evidence: list[SearchEvidenceItem]) -> Optional[str]:
         if not evidence:
@@ -237,3 +387,15 @@ class WebSearchClient:
             summary_parts.append("Primary sources include: " + ", ".join(top_sources))
 
         return " ".join(summary_parts) if summary_parts else None
+
+
+def _build_candidate_official_domains(question: str) -> list[str]:
+    capitalized_terms = re.findall(r"\b[A-Z][A-Za-z0-9]+\b", question)
+    candidate_terms = []
+
+    for term in capitalized_terms:
+        normalized = re.sub(r"[^a-z0-9]", "", term.lower())
+        if len(normalized) >= 3:
+            candidate_terms.append(normalized)
+
+    return [f"{term}.com" for term in dict.fromkeys(candidate_terms)]

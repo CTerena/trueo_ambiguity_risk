@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from main import analyze_market_prompt
 from models import RiskScoreResult, SearchContext, SearchEvidenceItem
 from config import FEW_SHOT_EXAMPLES_PATH
-from search import WebSearchClient, format_search_context
+from search import WebSearchClient, build_official_site_queries, format_search_context
 
 
 def test_basic_analysis():
@@ -284,6 +284,124 @@ def test_analyze_market_prompt_with_web_search():
     print("="*60)
 
 
+def test_official_sources_are_prioritized():
+    """
+    Test that official-looking domains are ranked ahead of media and community sources.
+    """
+    print("\n" + "="*60)
+    print("TEST: Official Source Prioritization")
+    print("="*60)
+
+    client = WebSearchClient(api_key="test-key")
+    evidence = [
+        SearchEvidenceItem(
+            title="Community Market",
+            url="https://manifold.markets/example",
+            snippet="Community discussion of possible resolution criteria.",
+            source="manifold.markets",
+            score=0.95,
+        ),
+        SearchEvidenceItem(
+            title="OpenAI Newsroom",
+            url="https://openai.com/news/example",
+            snippet="Official announcement channel for OpenAI.",
+            source="openai.com",
+            score=0.60,
+        ),
+        SearchEvidenceItem(
+            title="TechCrunch Coverage",
+            url="https://techcrunch.com/example",
+            snippet="Media coverage of OpenAI plans.",
+            source="techcrunch.com",
+            score=0.90,
+        ),
+    ]
+
+    ranked = client._prioritize_authoritative_sources(
+        query="Will OpenAI release a new model in March this year? official source definition resolution criteria",
+        evidence=evidence,
+    )
+
+    assert ranked[0].source == "openai.com"
+    assert ranked[-1].source == "manifold.markets"
+
+    print("\n✓ Official source ranked above media and community results")
+
+    print("\n" + "="*60)
+    print("✅ TEST PASSED: Official Source Prioritization")
+    print("="*60)
+
+
+def test_official_site_queries_are_generated():
+    """
+    Test that likely official domains are extracted into site-biased follow-up queries.
+    """
+    print("\n" + "="*60)
+    print("TEST: Official Site Query Generation")
+    print("="*60)
+
+    queries = build_official_site_queries("Will OpenAI release a new model in March this year?")
+
+    assert any("site:openai.com" in query for query in queries)
+
+    print("\n✓ Official site follow-up query generated for OpenAI")
+
+    print("\n" + "="*60)
+    print("✅ TEST PASSED: Official Site Query Generation")
+    print("="*60)
+
+
+def test_search_merges_official_site_results():
+    """
+    Test that the client runs a follow-up official-domain query and merges results.
+    """
+    print("\n" + "="*60)
+    print("TEST: Official Site Search Merge")
+    print("="*60)
+
+    client = WebSearchClient(api_key="test-key")
+    observed_queries = []
+
+    def fake_run_search_request(query: str):
+        observed_queries.append(query)
+        if query.startswith("site:openai.com"):
+            return {
+                "answer": None,
+                "results": [
+                    {
+                        "title": "OpenAI Official Announcement",
+                        "url": "https://openai.com/index/introducing-example",
+                        "content": "Official announcement from OpenAI.",
+                        "score": 0.40,
+                    }
+                ],
+            }
+        return {
+            "answer": "General answer",
+            "results": [
+                {
+                    "title": "Community Discussion",
+                    "url": "https://manifold.markets/example",
+                    "content": "Community discussion.",
+                    "score": 0.95,
+                }
+            ],
+        }
+
+    with patch.object(client, "_run_search_request", side_effect=fake_run_search_request):
+        context = client.search("Will OpenAI release a new model in March this year?")
+
+    assert any(query.startswith("site:openai.com") for query in observed_queries)
+    assert context.evidence[0].source == "openai.com"
+    assert any(item.source == "manifold.markets" for item in context.evidence)
+
+    print("\n✓ Official follow-up search merged and prioritized")
+
+    print("\n" + "="*60)
+    print("✅ TEST PASSED: Official Site Search Merge")
+    print("="*60)
+
+
 def run_all_tests():
     """
     Run all tests and report results.
@@ -297,6 +415,9 @@ def run_all_tests():
         ("Web Search Context Formatting", test_format_search_context),
         ("Web Search API Key Requirement", test_web_search_requires_api_key),
         ("Web Search Integration", test_analyze_market_prompt_with_web_search),
+        ("Official Source Prioritization", test_official_sources_are_prioritized),
+        ("Official Site Query Generation", test_official_site_queries_are_generated),
+        ("Official Site Search Merge", test_search_merges_official_site_results),
         ("Basic Analysis", test_basic_analysis),
         ("Output Format", test_output_format),
         ("High Risk Detection", test_high_risk_question),

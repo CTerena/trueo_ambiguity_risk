@@ -126,12 +126,13 @@ When web search is enabled, the system does four things:
 
 1. Builds a search query from the market question, biased toward authoritative and resolution-related evidence.
 2. Calls Tavily and collects the top results plus Tavily's short answer when available.
-3. Simplifies the raw results into a compact `SearchContext` with:
+3. Re-ranks the results to prefer likely official or authoritative sources over media and community discussion when possible.
+4. Simplifies the re-ranked results into a compact `SearchContext` with:
    - `query`
    - `provider`
    - `summary`
    - `evidence[]` containing `title`, `url`, `snippet`, `source`, `score`, and `published_date`
-4. Formats that simplified context into prompt text and injects it into the ambiguity analysis.
+5. Formats that simplified context into prompt text and injects it into the ambiguity analysis.
 
 This means the LLM does not receive the full raw API payload. It receives a reduced, prompt-friendly summary of the search evidence.
 
